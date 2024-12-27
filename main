@@ -1,0 +1,224 @@
+from bs4 import BeautifulSoup
+import feedparser
+from base64 import b64encode
+import concurrent.futures
+import requests
+import time
+import sys
+
+# 1. Settings
+RSS_FEEDS = [
+    "https://example.com/rss-feed"  # Example RSS feed URL
+]
+# Placeholder for processing API, change `openai_client` to your implementation or library
+openai_client = None  # Replace this with an actual OpenAI client setup
+
+WORDPRESS_URL = 'https://example.com/wp-json/wp/v2/posts'  # REST API URL
+WORDPRESS_USER = 'your_username'  # WordPress username
+WORDPRESS_APP_PASSWORD = 'your_application_password'  # Application Password
+
+PROCESSED_LINKS = set()  # Used to store processed links
+sys.stdout.reconfigure(encoding='utf-8')  # Ensure UTF-8 compatibility for systems needing it
+
+
+# 2. HTML cleanup
+def clean_html(html):
+    """
+    Cleans up HTML content by removing unnecessary tags using a reliable parser.
+    """
+
+    def parse_html(html):
+        try:
+            # Using "lxml" as a more efficient parser
+            soup = BeautifulSoup(html, 'lxml')
+            for tag in soup(["script", "style", "meta", "noscript"]):
+                tag.extract()
+            text = soup.get_text(separator="\n")
+            return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+        except Exception as e:
+            print(f"Error processing HTML: {e}")
+            return ""
+
+    # Timeout in case of long execution for safety
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(parse_html, html)
+        try:
+            return future.result(timeout=5)
+        except concurrent.futures.TimeoutError:
+            print("HTML processing timed out!")
+            return ""
+
+
+# 3. Article filtering
+def filter_article(cleaned_text, link):
+    prompt = f"""
+    Based on the text below, determine if the article meets the following requirements:
+    Requirements:
+    - It is not an advertisement or promotional content.
+    - It is related to immigration, visas, or policy changes.
+    Text:
+    {cleaned_text[:3000]}  # Trimming to 3000 characters for processing
+    Answer with "Yes" or "No".
+    """
+    # Adjust this to actual AI client implementation
+    response = None  # Replace with AI query implementation
+    return response.lower() == "yes"
+
+
+# 4. Content generation
+def generate_content(cleaned_text, link):
+    """
+    Generates a title and post content for WordPress using text input.
+    """
+    prompt = f"""
+    [Content generation logic with your input requirements here]
+    Text:
+    {cleaned_text}
+    
+    Output: Title and post body
+    """
+    # Adjust to use appropriate AI generation logic
+    response = None  # Replace with actual AI processing
+    return "Title", "Article body with HTML formatting", "Focus Keyphrase"
+
+
+# 5. Fetch WordPress categories and tags
+def fetch_wordpress_taxonomies():
+    """
+    Fetches categories and tags from WordPress.
+    """
+    credentials = f"{WORDPRESS_USER}:{WORDPRESS_APP_PASSWORD}"
+    token = b64encode(credentials.encode('utf-8')).decode('utf-8')
+    headers = {
+        'Authorization': f'Basic {token}'
+    }
+
+    def fetch_all(endpoint):
+        all_items = {}
+        page = 1
+        while True:
+            response = requests.get(f"{endpoint}?per_page=100&page={page}", headers=headers)
+            if response.status_code == 200:
+                items = response.json()
+                if not items:
+                    break
+                all_items.update({item['id']: item['name'] for item in items})
+                page += 1
+            else:
+                print(f"Failed to fetch from {endpoint}: {response.status_code}")
+                break
+        return all_items
+
+    categories_endpoint = WORDPRESS_URL.replace('/posts', '/categories')
+    tags_endpoint = WORDPRESS_URL.replace('/posts', '/tags')
+
+    categories = fetch_all(categories_endpoint)
+    tags = fetch_all(tags_endpoint)
+
+    return categories, tags
+
+
+# 6. Suggest categories and tags
+def suggest_tags_and_categories(article_body, categories, tags):
+    """
+    Suggests appropriate categories and tags for an article.
+    """
+    categories_list = ", ".join(categories.values())
+    tags_list = ", ".join(tags.values())
+
+    # AI-based tag/category suggestions implementation
+    prompt = f"""
+    Based on the article provided, suggest most relevant categories and tags. Ensure it matches the predefined lists.
+    Article:
+    {article_body}
+    Available Categories:
+    {categories_list}
+    Available Tags:
+    {tags_list}
+    """
+    response = None  # Replace with actual AI processing
+    return ["Category1", "Category2"], ["Tag1", "Tag2"]
+
+
+# 7. Publish to WordPress
+def publish_to_wordpress(title, article_body, focus_keyphrase, categories_ids, tags_ids):
+    """
+    Publishes an article to WordPress with metadata.
+    """
+    credentials = f"{WORDPRESS_USER}:{WORDPRESS_APP_PASSWORD}"
+    token = b64encode(credentials.encode('utf-8')).decode('utf-8')
+    headers = {
+        'Authorization': f'Basic {token}',
+        'Content-Type': 'application/json'
+    }
+    post_data = {
+        "title": title,
+        "content": article_body,
+        "status": "draft",
+        "meta": {
+            "rank_math_focus_keyword": focus_keyphrase
+        },
+        "categories": categories_ids,
+        "tags": tags_ids
+    }
+
+    response = requests.post(WORDPRESS_URL, headers=headers, json=post_data)
+
+    if response.status_code == 201:
+        post_id = response.json().get('id')
+        print(f"Post drafted successfully: {post_id}")
+        return post_id
+    else:
+        print(f"Failed to draft post: {response.status_code}")
+        return None
+
+
+# 8. Main RSS feed processing loop
+def process_rss_feed(feed_url):
+    """
+    Processes all entries from an RSS feed and attempts to publish eligible posts.
+    """
+    feed = feedparser.parse(feed_url)
+
+    for entry in feed.entries:
+        link = entry.link
+        if link in PROCESSED_LINKS:
+            continue
+
+        try:
+            response = requests.get(link)
+            response.encoding = 'utf-8'
+            html = response.text
+            cleaned_text = clean_html(html)
+
+            if not filter_article(cleaned_text, link):
+                continue
+
+            title, article_body, focus_keyphrase = generate_content(cleaned_text, link)
+
+            categories, tags = fetch_wordpress_taxonomies()
+            selected_categories, selected_tags = suggest_tags_and_categories(article_body, categories, tags)
+
+            categories_ids = [id for id, name in categories.items() if name in selected_categories]
+            tags_ids = [id for id, name in tags.items() if name in selected_tags]
+
+            post_id = publish_to_wordpress(title, article_body, focus_keyphrase, categories_ids, tags_ids)
+
+            if post_id:
+                PROCESSED_LINKS.add(link)
+
+        except Exception as e:
+            print(f"Error processing link {link}: {e}")
+
+
+# 9. Continuous execution
+def main():
+    while True:
+        for feed_url in RSS_FEEDS:
+            process_rss_feed(feed_url)
+        print("Waiting for the next cycle...")
+        time.sleep(3600)
+
+
+if __name__ == "__main__":
+    main()
